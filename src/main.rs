@@ -20,6 +20,59 @@ impl Vec3 {
     fn new(x: f32, y: f32, z: f32) -> Self {
         Self {x, y, z}
     }
+    fn add(self, o: Vec3) -> Vec3 {
+        Vec3::new(self.x + o.x, self.y + o.y, self.z + o.z)
+    }
+    fn scale(self, s: f32) -> Vec3{
+        Vec3::new(self.x * s, self.y * s, self.z * s)
+    }
+    fn cross(self, o: Vec3) -> Vec3 {
+        Vec3::new(
+            self.y * o.z - self.z * o.y,
+            self.z * o.x - self.x * o.z,
+            self.x * o.y - self.y * o.x,
+        )
+    }
+}
+
+// unit quantenion w + xi + yj + zk
+#[derive(Clone, Copy)]
+struct Quat {
+    w: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+impl Quat {
+    // axis must be a unit vector
+    fn from_axis_angle(axis: Vec3, angle: f32) -> Quat {
+        let (s, c) = (angle / 2.0).sin_cos();
+        Quat { w: c, x: axis.x * s, y: axis.y * s, z: axis.z * s }
+    }
+
+    // Hamilton product resulr = apply O first then Self 
+    fn mul(self, o: Quat) -> Quat {
+        Quat {
+            w: self.w * o.w - self.x * o.x - self.y * o.y - self.z * o.z,
+            x: self.w * o.x + self.x * o.w + self.y * o.z - self.z * o.y,
+            y: self.w * o.y - self.x * o.z + self.y * o.w + self.z * o.x,
+            z: self.w * o.z + self.x * o.y - self.y * o.x + self.z * o.w,
+        }
+    }
+
+    // Keep it unit length fights floating-point drift
+    fn normalize(self) -> Quat {
+        let n = (self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z).sqrt();
+        Quat { w: self.w / n, x: self.x / n, y: self.y / n, z: self.z / n }
+    }
+
+    // Rotate a vector: equivalent to q * v * q^-1,
+    fn rotate(self, v: Vec3) -> Vec3 {
+        let u = Vec3::new(self.x, self.y, self.z);
+        let t = u.cross(v).scale(2.0);
+        v.add(t.scale(self.w)).add(u.cross(t))
+    }
 }
 
 // fixed camera orientation rotate the world around x and y
@@ -99,6 +152,31 @@ fn draw_grid(buf: &mut [u32]) {
     }
 }
 
+// PHONE
+fn draw_phone(buf: &mut [u32], q: Quat, center: Vec3) {
+    let half = Vec3::new(0.35, 0.75, 0.04);
+
+    let corner = |i: usize| {
+        let local = Vec3::new(
+            if i & 1 != 0 { half.x } else { -half.x },
+            if i & 2 != 0 { half.y } else { -half.y },
+            if i & 4 != 0 { half.z } else { -half.z },
+        );
+        q.rotate(local).add(center)
+    };
+    for i in 0..8usize {
+        for bit in [1usize, 2, 4] {
+            if i & bit == 0 {
+                let j = i | bit;
+                // Screen face (+Z side) is bright, the rest is dim
+                let on_screen_face = bit != 4 && i & 4 != 0;
+                let color = if on_screen_face { 0x00FFFFFF } else { 0x00808090 };
+                line3d(buf, corner(i), corner(j), color);
+            } 
+        }
+    }
+}
+
 fn main() {
 
     // pixel buffer
@@ -117,6 +195,9 @@ fn main() {
     // 60 fps update limit
     window.set_target_fps(60);
 
+    let mut angle: f32 = 0.0;
+
+
     // main loop
     while window.is_open() && !window.is_key_down(Key::Escape) {
         // logic
@@ -130,6 +211,14 @@ fn main() {
         line3d(&mut buffer, o, Vec3::new(1.5, 0.0, 0.0), 0x00FF4040); // X red
         line3d(&mut buffer, o, Vec3::new(0.0, 1.5, 0.0), 0x0040FF40); // Y green
         line3d(&mut buffer, o, Vec3::new(0.0, 0.0, 1.5), 0x004080FF); // Z blue
+                                                                      //
+        // Spin around Y, plus a slower tumble around X
+        angle += 0.02;
+        let qy = Quat::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), angle);
+        let qx = Quat::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), angle * 0.7);
+        let q = qy.mul(qx).normalize();
+
+        draw_phone(&mut buffer, q, Vec3::new(0.0, 1.5, 0.0));
         
         // update window with buffer contents
         window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
