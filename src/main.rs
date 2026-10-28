@@ -1,8 +1,12 @@
 use minifb::{Key, Window, WindowOptions};
+use std::io::BufRead;
+use std::sync::mpsc;
+use std::thread;
+
 
 /// Window dimensions
-const WIDTH: usize = 900;
-const HEIGHT: usize = 700;
+const WIDTH: usize = 1200;
+const HEIGHT: usize = 1000;
 const CAM_DIST: f32 = 4.0; // camera on the Z-axis
 const FOCAL: f32 = 400.0; // bigger
 const YAW: f32 = 0.6; // camera orbit Left|Right radians
@@ -34,7 +38,6 @@ impl Vec3 {
         )
     }
 }
-
 // unit quantenion w + xi + yj + zk
 #[derive(Clone, Copy)]
 struct Quat {
@@ -72,6 +75,10 @@ impl Quat {
         let u = Vec3::new(self.x, self.y, self.z);
         let t = u.cross(v).scale(2.0);
         v.add(t.scale(self.w)).add(u.cross(t))
+    }
+
+    fn identity() -> Quat {
+        Quat { w: 1.0, x: 0.0, y: 0.0, z: 0.0 }
     }
 }
 
@@ -177,6 +184,36 @@ fn draw_phone(buf: &mut [u32], q: Quat, center: Vec3) {
     }
 }
 
+
+#[derive(Clone, Copy)]
+struct Pose {
+    pos: Vec3,
+    rot: Quat,
+}
+
+impl Pose {
+    fn start() -> Pose {
+        Pose { pos: Vec3::new(1.5, 1.5, 1.5), rot: Quat::identity() }
+    }
+}
+
+// "qw qx qy qz px py pz" -> Pose
+fn parse_pose(line: &str) -> Option<Pose> {
+    let v: Vec<f32> = line
+        .split_whitespace()
+        .map(|s| s.parse().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if v.len() != 7 {
+        return None;
+    }
+    Some(Pose {
+        rot: Quat { w: v[0], x: v[1], y: v[2], z: v[3] }.normalize(),
+        pos: Vec3::new(v[4], v[5], v[6]),
+    })
+}
+
+
+
 fn main() {
 
     // pixel buffer
@@ -195,7 +232,27 @@ fn main() {
     // 60 fps update limit
     window.set_target_fps(60);
 
-    let mut angle: f32 = 0.0;
+
+    // Background thread: reads lines from stdin, parses them, sends poses to main
+    let (tx, rx) = mpsc::channel::<Pose>();
+    thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else { break };
+            if let Some(p) = parse_pose(&line) {
+                if tx.send(p).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // let mut orientation = Quat::identity();
+    // const STEP: f32 = 0.03; //radians per frame while key is held
+
+    let mut pose = Pose::start();
+    const ROT_STEP: f32 = 0.03;   // radians per frame
+    const MOVE_STEP: f32 = 0.03;  // world units per frame
 
 
     // main loop
@@ -208,17 +265,56 @@ fn main() {
 
         // the Axes
         let o = Vec3::new(0.0, 0.0, 0.0);
-        line3d(&mut buffer, o, Vec3::new(1.5, 0.0, 0.0), 0x00FF4040); // X red
-        line3d(&mut buffer, o, Vec3::new(0.0, 1.5, 0.0), 0x0040FF40); // Y green
-        line3d(&mut buffer, o, Vec3::new(0.0, 0.0, 1.5), 0x004080FF); // Z blue
-                                                                      //
+        line3d(&mut buffer, o, Vec3::new(2.5, 0.0, 0.0), 0x00FF4040); // X red
+        line3d(&mut buffer, o, Vec3::new(0.0, 2.5, 0.0), 0x0040FF40); // Y green
+        line3d(&mut buffer, o, Vec3::new(0.0, 0.0, 2.5), 0x004080FF); // Z blue
+        
+        // Turn held keys into a small rotation about the phone's own axes
+        let mut delta = Quat::identity();
+        let x_axis = Vec3::new(1.0, 0.0, 0.0);
+        let y_axis = Vec3::new(0.0, 1.0, 0.0);
+        let z_axis = Vec3::new(0.0, 0.0, 1.0);
+
+        if window.is_key_down(Key::W) { delta = delta.mul(Quat::from_axis_angle(x_axis, -ROT_STEP)); }
+        if window.is_key_down(Key::S) { delta = delta.mul(Quat::from_axis_angle(x_axis,  ROT_STEP)); }
+        if window.is_key_down(Key::A) { delta = delta.mul(Quat::from_axis_angle(y_axis, -ROT_STEP)); }
+        if window.is_key_down(Key::D) { delta = delta.mul(Quat::from_axis_angle(y_axis,  ROT_STEP)); }
+        if window.is_key_down(Key::Q) { delta = delta.mul(Quat::from_axis_angle(z_axis,  ROT_STEP)); }
+        if window.is_key_down(Key::E) { delta = delta.mul(Quat::from_axis_angle(z_axis, -ROT_STEP)); }
+        pose.rot = pose.rot.mul(delta).normalize();
+
+        // --- Keyboard translation (world axes) ---
+        let mut mv = Vec3::new(0.0, 0.0, 0.0);
+        if window.is_key_down(Key::Left)      { mv.x -= MOVE_STEP; }
+        if window.is_key_down(Key::Right)     { mv.x += MOVE_STEP; }
+        if window.is_key_down(Key::Up)        { mv.z -= MOVE_STEP; } // away from camera
+        if window.is_key_down(Key::Down)      { mv.z += MOVE_STEP; } // toward camera
+        if window.is_key_down(Key::Space)     { mv.y += MOVE_STEP; }
+        if window.is_key_down(Key::LeftShift) { mv.y -= MOVE_STEP; }
+        pose.pos = pose.pos.add(mv);
+        
         // Spin around Y, plus a slower tumble around X
+        /*
         angle += 0.02;
         let qy = Quat::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), angle);
         let qx = Quat::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), angle * 0.7);
         let q = qy.mul(qx).normalize();
+        */
 
-        draw_phone(&mut buffer, q, Vec3::new(0.0, 1.5, 0.0));
+        // Apply the delta in the phone's local frame, then clean up drift
+        //orientation = orientation.mul(delta).normalize();
+        
+        if window.is_key_pressed(Key::R, minifb::KeyRepeat::No) {
+            pose = Pose::start();
+        }
+
+        // external feed
+        while let Ok(p) = rx.try_recv() {
+            pose = p;
+        }
+
+
+        draw_phone(&mut buffer, pose.rot, pose.pos);
         
         // update window with buffer contents
         window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
