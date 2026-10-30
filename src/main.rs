@@ -6,13 +6,14 @@ use std::thread;
 
 
 /// Window dimensions
-const WIDTH: usize = 1200;
-const HEIGHT: usize = 1000;
+const WIDTH: usize = 900;
+const HEIGHT: usize = 700;
 const CAM_DIST: f32 = 4.0; // camera on the Z-axis
 const FOCAL: f32 = 400.0; // bigger
-const YAW: f32 = 0.6; // camera orbit Left|Right radians
+const YAW: f32 = -0.6; // camera orbit Left|Right radians
 const PITCH: f32 = 0.5; // camera looks down from above
 const GRID_HALF: i32 = 5;
+const POS_SCALE: f32 = 10.0;
 
 #[derive(Clone, Copy)]
 struct Vec3 {
@@ -283,14 +284,14 @@ fn parse_pose(line: &str) -> Option<Pose> {
         rot: Quat::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), -std::f32::consts::FRAC_PI_2)
             .mul(Quat { w: v[0], x: v[1], y: v[2], z: v[3] })
             .normalize(),
-        pos: Vec3::new(v[4], v[5], v[6]),
+        pos: Vec3::new(v[4] * POS_SCALE, v[6] * POS_SCALE + 1.5, -v[5] * POS_SCALE),
     })
 }
 
 // listen to localhost:5555
 fn spawn_listener(tx: mpsc::Sender<Pose>) {
     thread::spawn(move || {
-        let listener = TcpListener::bind("127.0.0.1:5555").expect("Could not bind port 5555");
+        let listener = TcpListener::bind("127.0.0.1:8765").expect("Could not bind port 5555");
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             for line in BufReader::new(stream).lines() {
